@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>StudyFlow - AI Study Platform</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+    const { Upload, BookOpen, Brain, Clock, ChevronLeft, ChevronRight, Check, X, RotateCcw, Youtube, FileText, Award, Timer, Play, Zap } = lucide;
+
+    function StudyPlatform() {
+      const [stage, setStage] = useState('upload');
+      const [content, setContent] = useState(null);
+      const [currentFlashcard, setCurrentFlashcard] = useState(0);
+      const [flippedCard, setFlippedCard] = useState(false);
+      const [quizTime, setQuizTime] = useState(5);
+      const [quizAnswers, setQuizAnswers] = useState({});
+      const [timeRemaining, setTimeRemaining] = useState(0);
+      const [quizStarted, setQuizStarted] = useState(false);
+      const [showResults, setShowResults] = useState(false);
+      const timerRef = useRef(null);
+      const fileInputRef = useRef(null);
+
+      useEffect(() => {
+        if (quizStarted && timeRemaining > 0) {
+          timerRef.current = setInterval(() => {
+            setTimeRemaining(prev => {
+              if (prev <= 1) {
+                clearInterval(timerRef.current);
+                handleQuizSubmit();
+                return 0;
+              }
+              return prev - 1;
+            });
+          }, 1000);
+          return () => clearInterval(timerRef.current);
+        }
+      }, [quizStarted, timeRemaining]);
+
+      const loadPdfJs = async () => {
+        return new Promise((resolve, reject) => {
+          if (window.pdfjsLib) {
+            resolve(window.pdfjsLib);
+            return;
+          }
+          const script = document.createElement('script');
+          script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+          script.onload = () => {
+            window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+            resolve(window.pdfjsLib);
+          };
+          script.onerror = reject;
+          document.head.appendChild(script);
+        });
+      };
+
+      const handleFileUpload = async (e) => {
+        const file = e.target.files[0];
+        if (!file || file.type !== 'application/pdf') {
+          alert('Please upload a PDF file');
+          return;
+        }
+
+        setStage('processing');
+        
+        try {
+          const pdfjsLib = await loadPdfJs();
+          const arrayBuffer = await file.arrayBuffer();
+          const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+          
+          let extractedText = '';
+          for (let i = 1; i <= pdf.numPages; i++) {
+            const page = await pdf.getPage(i);
+            const textContent = await page.getTextContent();
+            const pageText = textContent.items.map(item => item.str).join(' ');
+            extractedText += pageText + '\n\n';
+          }
+          
+          if (!extractedText.trim()) {
+            alert('Could not extract text from PDF. The PDF might be image-based or encrypted.');
+            setStage('upload');
+            return;
+          }
+          
+          await generateContent(extractedText);
+        } catch (error) {
+          console.error('Error processing PDF:', error);
+          alert('Error processing PDF: ' + error.message);
+          setStage('upload');
+        }
+      };
+
+      const generateContent = async (text) => {
+        try {
+          // Call our backend instead of Claude API directly
+          const BACKEND_URL = window.location.hostname === 'localhost' 
+            ? 'http://localhost:3000'
+            : ''; // Same origin when deployed
+          
+          const response = await fetch(\`\${BACKEND_URL}/api/generate\`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text })
+          });
+
+          if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.error || \`Server error: \${response.status}\`);
+          }
+          
+          const parsedContent = await response.json();
+          
+          if (!parsedContent.summary || !parsedContent.flashcards || !parsedContent.quizQuestions) {
+            throw new Error('Invalid content structure from server');
+          }
+          
+          setContent(parsedContent);
+          setStage('menu');
+        } catch (error) {
+          console.error('Error:', error);
+          alert(\`Error generating materials: \${error.message}\\n\\nPlease try again.\`);
+          setStage('upload');
+        }
+      };
+
+      const handleQuizStart = () => {
+        setQuizStarted(true);
+        setTimeRemaining(quizTime * 60);
+        setQuizAnswers({});
+        setShowResults(false);
+      };
+
+      const handleQuizSubmit = () => {
+        clearInterval(timerRef.current);
+        setQuizStarted(false);
+        setShowResults(true);
+      };
+
+      const calculateScore = () => {
+        if (!content?.quizQuestions) return { score: 0, total: 0, percentage: 0 };
+        const total = Math.min(content.quizQuestions.length, getQuizQuestionsForTime().length);
+        const correct = Object.entries(quizAnswers).filter(([idx, answer]) => 
+          answer === content.quizQuestions[parseInt(idx)].correctAnswer
+        ).length;
+        return { score: correct, total, percentage: total > 0 ? Math.round((correct / total) * 100) : 0 };
+      };
+
+      const getQuizQuestionsForTime = () => {
+        if (!content?.quizQuestions) return [];
+        const numQuestions = Math.min(quizTime * 4, content.quizQuestions.length);
+        return content.quizQuestions.slice(0, numQuestions);
+      };
+
+      const formatTime = (seconds) => {
+        const mins = Math.floor(seconds / 60);
+        const secs = seconds % 60;
+        return \`\${mins}:\${secs.toString().padStart(2, '0')}\`;
+      };
+
+      const getYouTubeLink = () => {
+        if (!content?.summary?.youtubeSearch) return '#';
+        return \`https://www.youtube.com/results?search_query=\${encodeURIComponent(content.summary.youtubeSearch)}\`;
+      };
+
+      // UPLOAD STAGE
+      if (stage === 'upload') {
+        return (
+          <div className="min-h-screen bg-slate-950 flex items-center justify-center p-8" style={{ fontFamily: "'DM Sans', sans-serif" }}>
+            <style>{\`
+              @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;900&family=Instrument+Serif&display=swap');
+              @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-20px); }}
+              @keyframes slideUp { from { opacity: 0; transform: translateY(30px); } to { opacity: 1; transform: translateY(0); }}
+              .float-animation { animation: float 6s ease-in-out infinite; }
+              .slide-up { animation: slideUp 0.8s ease-out forwards; }
+            \`}</style>
+            
+            <div className="max-w-5xl w-full">
+              <div className="text-center mb-16 slide-up">
+                <div className="inline-block mb-6 float-animation">
+                  <React.createElement(FileText, { className: "w-24 h-24 text-cyan-400", strokeWidth: 1.5 })
+                </div>
+                <h1 className="text-7xl font-black mb-4 text-white tracking-tight" style={{ fontFamily: "'Instrument Serif', serif" }}>
+                  Study<span className="text-cyan-400">Flow</span>
+                </h1>
+                <p className="text-xl text-slate-400 font-medium max-w-2xl mx-auto">
+                  Transform your PDFs into comprehensive study materials with AI
+                </p>
+              </div>
+
+              <div className="slide-up" style={{ animationDelay: '0.2s', opacity: 0 }}>
+                <div onClick={() => fileInputRef.current?.click()}
+                  className="group relative bg-slate-900 border-2 border-slate-800 rounded-2xl p-16 cursor-pointer hover:border-cyan-500/50 hover:shadow-2xl hover:shadow-cyan-500/20 transition-all duration-500">
+                  <div className="absolute inset-0 bg-gradient-to-br from-cyan-500/5 to-blue-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-500 rounded-2xl"></div>
+                  <div className="relative text-center">
+                    <div className="inline-flex items-center justify-center w-20 h-20 rounded-full bg-slate-800 border border-slate-700 mb-6 group-hover:bg-cyan-500/10 group-hover:border-cyan-500/50 transition-all">
+                      {React.createElement(Upload, { className: "w-9 h-9 text-slate-400 group-hover:text-cyan-400 transition-colors", strokeWidth: 1.5 })}
+                    </div>
+                    <h3 className="text-2xl font-bold text-white mb-3">Upload Your PDF</h3>
+                    <p className="text-slate-400 mb-8 max-w-md mx-auto">
+                      Drop your PDF here or click to browse
+                    </p>
+                    <div className="inline-flex items-center gap-3 px-8 py-4 bg-cyan-500 text-slate-950 rounded-xl font-bold hover:bg-cyan-400 transition-all shadow-lg shadow-cyan-500/30">
+                      {React.createElement(Upload, { className: "w-5 h-5" })}
+                      Select PDF File
+                    </div>
+                    <input ref={fileInputRef} type="file" accept=".pdf" onChange={handleFileUpload} className="hidden" />
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-12 grid grid-cols-3 gap-6 slide-up" style={{ animationDelay: '0.4s', opacity: 0 }}>
+                {[
+                  { Icon: BookOpen, title: 'Smart Summaries', desc: 'AI-generated overviews with YouTube links' },
+                  { Icon: Brain, title: 'Dynamic Flashcards', desc: 'Interactive cards for active recall' },
+                  { Icon: Timer, title: 'Timed Quizzes', desc: 'Adaptive tests with instant feedback' }
+                ].map((item, i) => (
+                  <div key={i} className="bg-slate-900/50 border border-slate-800 rounded-xl p-6 text-center">
+                    {React.createElement(item.Icon, { className: "w-8 h-8 text-cyan-400 mx-auto mb-3", strokeWidth: 1.5 })}
+                    <h4 className="text-white font-semibold mb-1">{item.title}</h4>
+                    <p className="text-sm text-slate-400">{item.desc}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      // PROCESSING STAGE
+      if (stage === 'processing') {
+        return (
+          <div className="min-h-screen bg-slate-950 flex items-center justify-center p-8" style={{ fontFamily: "'DM Sans', sans-serif" }}>
+            <div className="text-center max-w-md">
+              <div className="relative w-32 h-32 mx-auto mb-8">
+                <div className="absolute inset-0 border-4 border-slate-800 rounded-full"></div>
+                <div className="absolute inset-0 border-4 border-t-cyan-500 border-r-cyan-500 rounded-full animate-spin"></div>
+                {React.createElement(Brain, { className: "absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-10 h-10 text-cyan-400" })}
+              </div>
+              <h2 className="text-3xl font-bold text-white mb-3">Analyzing Your PDF</h2>
+              <p className="text-slate-400 text-lg mb-6">Extracting text and generating study materials...</p>
+              <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 text-left">
+                {['Reading PDF pages', 'Analyzing content with AI', 'Creating study package'].map((step, i) => (
+                  <div key={i} className="flex items-center gap-3 mb-2">
+                    <div className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" style={{ animationDelay: \`\${i * 0.3}s\` }}></div>
+                    <span className="text-sm text-slate-400">{step}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      // MENU STAGE
+      if (stage === 'menu') {
+        const menuItems = [
+          { title: 'Summary', Icon: BookOpen, desc: 'Comprehensive overview with key insights', onClick: () => setStage('summary') },
+          { title: 'Flashcards', Icon: Brain, desc: \`\${content?.flashcards?.length || 0} cards for active recall\`, onClick: () => setStage('flashcards') },
+          { title: 'Quiz', Icon: Clock, desc: 'Timed assessment with instant feedback', onClick: () => setStage('quiz') }
+        ];
+
+        return (
+          <div className="min-h-screen bg-slate-950 p-8" style={{ fontFamily: "'DM Sans', sans-serif" }}>
+            <div className="max-w-6xl mx-auto">
+              <div className="text-center mb-16">
+                <h1 className="text-5xl font-black text-white mb-3" style={{ fontFamily: "'Instrument Serif', serif" }}>
+                  {content?.summary?.title || 'Your Study Materials'}
+                </h1>
+                <p className="text-xl text-slate-400">Select your learning mode</p>
+              </div>
+              <div className="grid md:grid-cols-3 gap-6 mb-12">
+                {menuItems.map((item, i) => (
+                  <div key={i} onClick={item.onClick}
+                    className="group relative bg-slate-900 border-2 border-slate-800 rounded-2xl p-8 cursor-pointer hover:border-cyan-500/50 hover:shadow-xl hover:shadow-cyan-500/20 hover:scale-105 transition-all duration-300">
+                    <div className="absolute inset-0 bg-gradient-to-br from-cyan-500/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity rounded-2xl"></div>
+                    <div className="relative">
+                      <div className="w-16 h-16 rounded-xl bg-slate-800 border border-slate-700 flex items-center justify-center mb-6 group-hover:bg-cyan-500/10 group-hover:border-cyan-500/50 transition-all">
+                        {React.createElement(item.Icon, { className: "w-8 h-8 text-cyan-400", strokeWidth: 1.5 })}
+                      </div>
+                      <h3 className="text-2xl font-bold text-white mb-3">{item.title}</h3>
+                      <p className="text-slate-400 mb-6">{item.desc}</p>
+                      <div className="flex items-center text-cyan-400 font-semibold gap-2 group-hover:gap-3 transition-all">
+                        Start {React.createElement(ChevronRight, { className: "w-5 h-5" })}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="text-center">
+                <button onClick={() => setStage('upload')} className="text-slate-400 hover:text-white font-semibold flex items-center gap-2 mx-auto">
+                  {React.createElement(ChevronLeft, { className: "w-5 h-5" })} Upload New PDF
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      // SUMMARY STAGE
+      if (stage === 'summary') {
+        return (
+          <div className="min-h-screen bg-slate-950 p-8" style={{ fontFamily: "'DM Sans', sans-serif" }}>
+            <div className="max-w-4xl mx-auto">
+              <button onClick={() => setStage('menu')} className="mb-8 flex items-center text-slate-400 hover:text-cyan-400 font-semibold">
+                {React.createElement(ChevronLeft, { className: "w-5 h-5 mr-2" })} Back to Menu
+              </button>
+              <div className="bg-slate-900 border-2 border-slate-800 rounded-2xl p-12">
+                <div className="flex items-start justify-between mb-8 flex-wrap gap-4">
+                  <h1 className="text-4xl font-black text-white" style={{ fontFamily: "'Instrument Serif', serif" }}>
+                    {content?.summary?.title}
+                  </h1>
+                  <a href={getYouTubeLink()} target="_blank" rel="noopener noreferrer"
+                    className="flex items-center gap-2 px-6 py-3 bg-red-600 text-white rounded-xl font-bold hover:bg-red-500 transition-all shadow-lg">
+                    {React.createElement(Youtube, { className: "w-5 h-5" })} Watch Explanation
+                  </a>
+                </div>
+                <div className="text-slate-300 leading-relaxed whitespace-pre-wrap mb-10">
+                  {content?.summary?.overview}
+                </div>
+                <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-8">
+                  <div className="flex items-center gap-3 mb-6">
+                    {React.createElement(Zap, { className: "w-6 h-6 text-cyan-400" })}
+                    <h2 className="text-2xl font-bold text-white">Key Takeaways</h2>
+                  </div>
+                  <div className="space-y-4">
+                    {content?.summary?.keyPoints?.map((point, i) => (
+                      <div key={i} className="flex items-start gap-4">
+                        <div className="w-8 h-8 rounded-lg bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 flex items-center justify-center font-bold flex-shrink-0">
+                          {i + 1}
+                        </div>
+                        <p className="text-slate-300 text-lg pt-1">{point}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      // FLASHCARDS STAGE
+      if (stage === 'flashcards') {
+        const cards = content?.flashcards || [];
+        const progress = cards.length > 0 ? ((currentFlashcard + 1) / cards.length) * 100 : 0;
+
+        return (
+          <div className="min-h-screen bg-slate-950 p-8" style={{ fontFamily: "'DM Sans', sans-serif" }}>
+            <style>{\`
+              .card-3d { transform-style: preserve-3d; transition: transform 0.6s; }
+              .card-3d.flipped { transform: rotateY(180deg); }
+              .card-face { backface-visibility: hidden; -webkit-backface-visibility: hidden; }
+              .card-back { transform: rotateY(180deg); }
+            \`}</style>
+            
+            <div className="max-w-4xl mx-auto">
+              <button onClick={() => setStage('menu')} className="mb-8 flex items-center text-slate-400 hover:text-cyan-400 font-semibold">
+                {React.createElement(ChevronLeft, { className: "w-5 h-5 mr-2" })} Back
+              </button>
+              <div className="mb-8">
+                <div className="flex justify-between items-center mb-3">
+                  <span className="text-sm font-semibold text-slate-400">Card {currentFlashcard + 1} of {cards.length}</span>
+                  <span className="text-sm font-semibold text-cyan-400">{Math.round(progress)}% Complete</span>
+                </div>
+                <div className="h-2 bg-slate-800 rounded-full"><div className="h-full bg-gradient-to-r from-cyan-500 to-cyan-400 transition-all duration-500 rounded-full" style={{ width: \`\${progress}%\` }}></div></div>
+              </div>
+              <div className="perspective-1000 mb-8 h-96">
+                <div onClick={() => setFlippedCard(!flippedCard)} className={\`card-3d w-full h-full cursor-pointer relative \${flippedCard ? 'flipped' : ''}\`}>
+                  <div className="card-face absolute inset-0">
+                    <div className="h-full bg-slate-900 border-2 border-slate-800 rounded-2xl p-12 flex flex-col items-center justify-center hover:border-cyan-500/50 transition-all">
+                      <div className="text-xs font-semibold text-cyan-400 mb-6 uppercase tracking-wider">Question</div>
+                      <p className="text-3xl font-bold text-center text-white mb-8">{cards[currentFlashcard]?.front}</p>
+                      <p className="text-slate-500 text-sm flex items-center gap-2">{React.createElement(Play, { className: "w-4 h-4" })} Click to reveal</p>
+                    </div>
+                  </div>
+                  <div className="card-face card-back absolute inset-0">
+                    <div className="h-full bg-gradient-to-br from-cyan-600 to-cyan-500 border-2 border-cyan-400 rounded-2xl p-12 flex flex-col items-center justify-center">
+                      <div className="text-xs font-semibold text-cyan-100 mb-6 uppercase tracking-wider">Answer</div>
+                      <p className="text-2xl font-bold text-center text-white mb-8">{cards[currentFlashcard]?.back}</p>
+                      <p className="text-cyan-100 text-sm flex items-center gap-2">{React.createElement(RotateCcw, { className: "w-4 h-4" })} Click to flip</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="flex justify-between items-center">
+                <button onClick={() => { setCurrentFlashcard(Math.max(0, currentFlashcard - 1)); setFlippedCard(false); }}
+                  disabled={currentFlashcard === 0}
+                  className="flex items-center gap-2 px-6 py-3 bg-slate-900 border-2 border-slate-800 text-white rounded-xl font-semibold hover:border-cyan-500/50 transition-all disabled:opacity-30">
+                  {React.createElement(ChevronLeft, { className: "w-5 h-5" })} Previous
+                </button>
+                <button onClick={() => { setCurrentFlashcard(0); setFlippedCard(false); }} className="p-3 text-slate-400 hover:text-cyan-400">
+                  {React.createElement(RotateCcw, { className: "w-5 h-5" })}
+                </button>
+                <button onClick={() => { setCurrentFlashcard(Math.min(cards.length - 1, currentFlashcard + 1)); setFlippedCard(false); }}
+                  disabled={currentFlashcard === cards.length - 1}
+                  className="flex items-center gap-2 px-6 py-3 bg-cyan-500 text-slate-950 rounded-xl font-semibold hover:bg-cyan-400 transition-all disabled:opacity-30 shadow-lg shadow-cyan-500/30">
+                  Next {React.createElement(ChevronRight, { className: "w-5 h-5" })}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      // QUIZ STAGE
+      if (stage === 'quiz') {
+        const quizQuestions = getQuizQuestionsForTime();
+
+        if (!quizStarted && !showResults) {
+          return (
+            <div className="min-h-screen bg-slate-950 p-8" style={{ fontFamily: "'DM Sans', sans-serif" }}>
+              <div className="max-w-3xl mx-auto">
+                <button onClick={() => setStage('menu')} className="mb-8 flex items-center text-slate-400 hover:text-cyan-400 font-semibold">
+                  {React.createElement(ChevronLeft, { className: "w-5 h-5 mr-2" })} Back
+                </button>
+                <div className="bg-slate-900 border-2 border-slate-800 rounded-2xl p-12">
+                  <div className="text-center mb-10">
+                    <div className="w-20 h-20 rounded-2xl bg-slate-800 border border-slate-700 flex items-center justify-center mx-auto mb-6">
+                      {React.createElement(Clock, { className: "w-10 h-10 text-cyan-400" })}
+                    </div>
+                    <h1 className="text-4xl font-black text-white mb-3" style={{ fontFamily: "'Instrument Serif', serif" }}>Quiz Time</h1>
+                    <p className="text-xl text-slate-400">Test your knowledge</p>
+                  </div>
+                  <div className="space-y-6 mb-10">
+                    <div>
+                      <label className="block text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">Select Duration</label>
+                      <div className="grid grid-cols-4 gap-4">
+                        {[5, 10, 15, 20].map(mins => (
+                          <button key={mins} onClick={() => setQuizTime(mins)}
+                            className={\`py-4 px-6 rounded-xl font-bold text-lg transition-all \${quizTime === mins ? 'bg-cyan-500 text-slate-950 scale-105 shadow-lg shadow-cyan-500/30' : 'bg-slate-800 border border-slate-700 text-slate-300 hover:border-cyan-500/50'}\`}>
+                            {mins}m
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-6 space-y-3">
+                      <div className="flex items-center justify-between text-slate-300">
+                        <span className="font-semibold">Questions</span>
+                        <span className="text-2xl font-bold text-cyan-400">{Math.min(quizTime * 4, content?.quizQuestions?.length || 0)}</span>
+                      </div>
+                      <div className="flex items-center justify-between text-slate-300">
+                        <span className="font-semibold">Time per Question</span>
+                        <span className="text-lg font-bold text-cyan-400">~{Math.round(quizTime * 60 / Math.min(quizTime * 4, content?.quizQuestions?.length || 1))}s</span>
+                      </div>
+                    </div>
+                  </div>
+                  <button onClick={handleQuizStart} className="w-full py-5 bg-cyan-500 text-slate-950 rounded-xl font-bold text-xl hover:bg-cyan-400 transition-all shadow-lg shadow-cyan-500/30">
+                    Start Quiz
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        }
+
+        if (showResults) {
+          const { score, total, percentage } = calculateScore();
+          const passed = percentage >= 70;
+
+          return (
+            <div className="min-h-screen bg-slate-950 p-8" style={{ fontFamily: "'DM Sans', sans-serif" }}>
+              <div className="max-w-4xl mx-auto">
+                <div className="bg-slate-900 border-2 border-slate-800 rounded-2xl p-12">
+                  <div className="text-center mb-12">
+                    <div className={\`w-28 h-28 rounded-2xl flex items-center justify-center mx-auto mb-6 \${passed ? 'bg-emerald-500/10 border-2 border-emerald-500' : 'bg-orange-500/10 border-2 border-orange-500'}\`}>
+                      {React.createElement(Award, { className: \`w-14 h-14 \${passed ? 'text-emerald-400' : 'text-orange-400'}\` })}
+                    </div>
+                    <h1 className="text-5xl font-black text-white mb-4" style={{ fontFamily: "'Instrument Serif', serif" }}>
+                      {passed ? 'Excellent Work!' : 'Keep Practicing!'}
+                    </h1>
+                    <div className="text-8xl font-black mb-4 bg-gradient-to-r from-cyan-400 to-cyan-300 text-transparent bg-clip-text">{percentage}%</div>
+                    <p className="text-2xl text-slate-400">{score} out of {total} correct</p>
+                  </div>
+                  <div className="space-y-4 mb-10">
+                    {quizQuestions.map((q, idx) => {
+                      const userAnswer = quizAnswers[idx];
+                      const isCorrect = userAnswer === q.correctAnswer;
+                      const answered = userAnswer !== undefined;
+
+                      return (
+                        <div key={idx} className={\`p-6 rounded-xl border-2 \${!answered ? 'bg-slate-800/30 border-slate-700' : isCorrect ? 'bg-emerald-500/5 border-emerald-500/30' : 'bg-red-500/5 border-red-500/30'}\`}>
+                          <div className="flex items-start gap-4 mb-4">
+                            <div className={\`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 font-bold \${!answered ? 'bg-slate-700 text-slate-400' : isCorrect ? 'bg-emerald-500 text-white' : 'bg-red-500 text-white'}\`}>
+                              {!answered ? '?' : isCorrect ? React.createElement(Check, { className: "w-5 h-5" }) : React.createElement(X, { className: "w-5 h-5" })}
+                            </div>
+                            <p className="font-semibold text-white">{q.question}</p>
+                          </div>
+                          <div className="ml-12 space-y-2">
+                            {q.options.map((option, optIdx) => {
+                              const isUserAnswer = userAnswer === optIdx;
+                              const isCorrectAnswer = optIdx === q.correctAnswer;
+                              return (
+                                <div key={optIdx} className={\`p-3 rounded-lg \${isCorrectAnswer ? 'bg-emerald-500/10 border-2 border-emerald-500/50 font-semibold text-white' : isUserAnswer && !isCorrect ? 'bg-red-500/10 border-2 border-red-500/50 text-white' : 'bg-slate-800/50 border border-slate-700 text-slate-300'}\`}>
+                                  {option}
+                                  {isCorrectAnswer && <span className="ml-2 text-emerald-400 font-bold text-sm">✓ Correct</span>}
+                                  {isUserAnswer && !isCorrect && <span className="ml-2 text-red-400 font-bold text-sm">✗ Your answer</span>}
+                                </div>
+                              );
+                            })}
+                          </div>
+                          {answered && !isCorrect && (
+                            <div className="ml-12 mt-4 p-4 bg-slate-800/50 border-l-4 border-cyan-500 rounded">
+                              <p className="text-sm text-slate-300"><span className="font-semibold text-cyan-400">Explanation: </span>{q.explanation}</p>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="flex gap-4">
+                    <button onClick={() => { setQuizAnswers({}); setShowResults(false); }}
+                      className="flex-1 py-4 bg-cyan-500 text-slate-950 rounded-xl font-bold text-lg hover:bg-cyan-400 transition-all shadow-lg shadow-cyan-500/30">
+                      Retake Quiz
+                    </button>
+                    <button onClick={() => setStage('menu')}
+                      className="flex-1 py-4 bg-slate-800 border-2 border-slate-700 text-white rounded-xl font-bold text-lg hover:border-cyan-500/50 transition-all">
+                      Back to Menu
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        }
+
+        // Active Quiz
+        return (
+          <div className="min-h-screen bg-slate-950 p-8" style={{ fontFamily: "'DM Sans', sans-serif" }}>
+            <div className="max-w-4xl mx-auto">
+              <div className="mb-8 bg-slate-900 border-2 border-slate-800 rounded-xl p-6">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-4">
+                    <div className={\`w-12 h-12 rounded-lg \${timeRemaining < 60 ? 'bg-red-500/10 border border-red-500' : 'bg-cyan-500/10 border border-cyan-500'} flex items-center justify-center\`}>
+                      {React.createElement(Clock, { className: \`w-6 h-6 \${timeRemaining < 60 ? 'text-red-400' : 'text-cyan-400'}\` })}
+                    </div>
+                    <span className={\`text-4xl font-black \${timeRemaining < 60 ? 'text-red-400' : 'text-white'}\`}>{formatTime(timeRemaining)}</span>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-sm text-slate-400 font-semibold uppercase tracking-wider mb-1">Progress</div>
+                    <div className="text-2xl font-bold text-cyan-400">{Object.keys(quizAnswers).length} / {quizQuestions.length}</div>
+                  </div>
+                </div>
+                <div className="mt-4 h-2 bg-slate-800 rounded-full">
+                  <div className="h-full bg-gradient-to-r from-cyan-500 to-cyan-400 transition-all duration-300 rounded-full" 
+                    style={{ width: \`\${(Object.keys(quizAnswers).length / quizQuestions.length) * 100}%\` }}></div>
+                </div>
+              </div>
+              <div className="space-y-6 mb-8">
+                {quizQuestions.map((q, idx) => (
+                  <div key={idx} className="bg-slate-900 border-2 border-slate-800 rounded-xl p-8">
+                    <div className="flex items-start gap-4 mb-6">
+                      <div className="w-10 h-10 rounded-lg bg-cyan-500/10 border border-cyan-500/50 text-cyan-400 flex items-center justify-center font-bold flex-shrink-0">{idx + 1}</div>
+                      <p className="text-xl font-bold text-white pt-1">{q.question}</p>
+                    </div>
+                    <div className="ml-14 space-y-3">
+                      {q.options.map((option, optIdx) => (
+                        <button key={optIdx} onClick={() => setQuizAnswers({ ...quizAnswers, [idx]: optIdx })}
+                          className={\`w-full text-left p-4 rounded-xl font-semibold transition-all \${quizAnswers[idx] === optIdx ? 'bg-cyan-500 text-slate-950 scale-105 shadow-lg shadow-cyan-500/30' : 'bg-slate-800 border border-slate-700 text-slate-300 hover:border-cyan-500/50'}\`}>
+                          {option}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <button onClick={handleQuizSubmit} disabled={Object.keys(quizAnswers).length < quizQuestions.length}
+                className="w-full py-5 bg-cyan-500 text-slate-950 rounded-xl font-bold text-xl hover:bg-cyan-400 transition-all disabled:opacity-30 disabled:cursor-not-allowed shadow-lg shadow-cyan-500/30">
+                Submit Quiz
+              </button>
+            </div>
+          </div>
+        );
+      }
+
+      return null;
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(React.createElement(StudyPlatform));
+  </script>
+</body>
+</html>
